@@ -6,126 +6,58 @@ import pytz
 # -----------------------------
 # Config and URLs
 # -----------------------------
-st.set_page_config(page_title="SAC Management View", layout="wide")
+st.set_page_config(page_title="SAC Mods Dashboard", layout="wide")
 
-transactions_url = "https://docs.google.com/spreadsheets/d/1RkQTTAAizRMHTsn7hnClowbob5rYE0zM6riGguTK0Bs/export?format=csv&gid=645688819"
-items_url = "https://docs.google.com/spreadsheets/d/1RkQTTAAizRMHTsn7hnClowbob5rYE0zM6riGguTK0Bs/export?format=csv&gid=824906690"
-staff_url = "https://docs.google.com/spreadsheets/d/1RkQTTAAizRMHTsn7hnClowbob5rYE0zM6riGguTK0Bs/export?format=csv&gid=1941399770"
-customers_url = "https://docs.google.com/spreadsheets/d/1RkQTTAAizRMHTsn7hnClowbob5rYE0zM6riGguTK0Bs/export?format=csv&gid=1921622491"
 logs_url = "https://docs.google.com/spreadsheets/d/1RkQTTAAizRMHTsn7hnClowbob5rYE0zM6riGguTK0Bs/export?format=csv&gid=316444388"
 
 # -----------------------------
 # Load Data
 # -----------------------------
-fact_engines = pd.read_csv(transactions_url)
-items = pd.read_csv(items_url)
-staff = pd.read_csv(staff_url, skiprows=3, usecols=[0, 1])
-customers = pd.read_csv(customers_url)
 logs = pd.read_csv(logs_url)
 
-# Fix columns
-items.columns = ['Item', 'Material Cost', 'RRP']
-logs.columns = ['Timestamp_Logs', 'Player', 'Vehicle', 'Service', 'Price', 'Mechanic']
-
-# Parse engine timestamps (assumed local/no timezone)
-fact_engines["Timestamp"] = pd.to_datetime(fact_engines["Timestamp"], format="%m/%d/%Y %H:%M:%S", errors="coerce")
+logs.columns = ['Timestamp', 'Player', 'Vehicle', 'Service', 'Price', 'Mechanic']
 
 # -----------------------------
-# Process Staff - add 'Blank' for missing staff names
+# Process Mods Data
 # -----------------------------
-fact_engines["Staff Name"] = fact_engines["Staff Name"].fillna("Blank")
-
-# -----------------------------
-# Prepare Engines DataFrame
-# -----------------------------
-engines_df = fact_engines.merge(items, on="Item", how="left")
-engines_df = engines_df.merge(staff, on="Staff Name", how="left")
-engines_df["Type"] = "Engines"
-engines_df["RRP"] = engines_df["RRP"].replace('[\$,]', '', regex=True).astype(float)
-engines_df["Material Cost"] = engines_df["Material Cost"].replace('[\$,]', '', regex=True).astype(float)
-engines_df["Sales"] = engines_df["RRP"]
-engines_df["Profit"] = engines_df["Sales"] - engines_df["Material Cost"]
-
-# -----------------------------
-# Process Logs (Mods)
-# -----------------------------
-logs_df = logs.merge(staff, left_on="Mechanic", right_on="Discord Name", how="left")
-logs_df = logs_df.rename(columns={
-    "Timestamp_Logs": "Timestamp",
+mods_df = logs.rename(columns={
     "Player": "Customer Name",
     "Service": "Item",
     "Price": "Sales"
 })
-logs_df["Staff Name"] = logs_df["Staff Name"].fillna("Blank")
-logs_df["Timestamp"] = pd.to_datetime(logs_df["Timestamp"], utc=True, errors="coerce")
+mods_df["Mechanic"] = mods_df["Mechanic"].fillna("Blank")
+
+# Timezone: UTC -> Brisbane
+mods_df["Timestamp"] = pd.to_datetime(mods_df["Timestamp"], utc=True, errors="coerce")
 brisbane_tz = pytz.timezone("Australia/Brisbane")
-logs_df["Timestamp"] = logs_df["Timestamp"].dt.tz_convert(brisbane_tz)
-logs_df["Timestamp"] = logs_df["Timestamp"].dt.tz_localize(None)
-logs_df["Sales"] = logs_df["Sales"].replace('[\$,]', '', regex=True).astype(float)
-logs_df["Profit"] = logs_df["Sales"] * 0.10
-logs_df["Material Cost"] = logs_df["Sales"] * 0.80
-logs_df["Type"] = "Mods"
+mods_df["Timestamp"] = mods_df["Timestamp"].dt.tz_convert(brisbane_tz).dt.tz_localize(None)
+
+# Financials
+mods_df["Sales"] = mods_df["Sales"].replace(r'[\$,]', '', regex=True).astype(float)
+mods_df["Profit"] = mods_df["Sales"] * 0.10
+mods_df["Material Cost"] = mods_df["Sales"] * 0.80
+mods_df["Pay"] = mods_df["Sales"] * 0.10
 
 # -----------------------------
-# Combine staff names for filter
-# -----------------------------
-all_staff_names = pd.Series(list(engines_df["Staff Name"].unique()) + list(logs_df["Staff Name"].unique())).unique()
-
-# -----------------------------
-# Sidebar Filters (Reordered: Date First)
+# Sidebar Filters
 # -----------------------------
 st.sidebar.header("Filters")
-st.sidebar.header("View")
 
-data_source_option = st.sidebar.radio(
-    "Select data to display:",
-    options=["Engines", "Mods", "Both"],
-    index=2,
-)
+min_date = mods_df["Timestamp"].min().date()
+max_date = mods_df["Timestamp"].max().date()
 
-# Combine data based on toggle (before date filter)
-if data_source_option == "Engines":
-    combined_df = engines_df.copy()
-elif data_source_option == "Mods":
-    combined_df = logs_df.copy()
-else:
-    combined_df = pd.concat([engines_df, logs_df], ignore_index=True)
-
-# Determine min and max dates
-min_date = combined_df["Timestamp"].min().date()
-max_date = combined_df["Timestamp"].max().date()
-
-# Show date filters
 start_date = st.sidebar.date_input("Start Date", min_value=min_date, max_value=max_date, value=min_date)
 end_date = st.sidebar.date_input("End Date", min_value=min_date, max_value=max_date, value=max_date)
 
-# Filter staff list *after* date selection is applied
-mask_date_sidebar = (combined_df["Timestamp"].dt.date >= start_date) & (combined_df["Timestamp"].dt.date <= end_date)
-filtered_df_for_sidebar = combined_df.loc[mask_date_sidebar]
+# Filter by date first, then populate staff filter from that range
+date_mask = (mods_df["Timestamp"].dt.date >= start_date) & (mods_df["Timestamp"].dt.date <= end_date)
+date_filtered_df = mods_df.loc[date_mask]
 
-# Get staff names only from filtered date range
-all_staff_names = pd.Series(filtered_df_for_sidebar["Staff Name"].fillna("Blank").unique()).sort_values().tolist()
+mechanic_names = sorted(date_filtered_df["Mechanic"].fillna("Blank").unique().tolist())
+selected_mechanics = st.sidebar.multiselect("Select Mechanic(s)", options=mechanic_names, default=mechanic_names)
 
-# Staff filter
-selected_staff = st.sidebar.multiselect("Select Staff Name(s)", options=all_staff_names, default=all_staff_names)
-
-
-# -----------------------------
-# Filter combined_df by date
-# -----------------------------
-mask_date = (combined_df["Timestamp"].dt.date >= start_date) & (combined_df["Timestamp"].dt.date <= end_date)
-final_df = combined_df.loc[mask_date].copy()
-
-# -----------------------------
-# Format final dataframe for display
-# -----------------------------
-final_df["Sales"] = pd.to_numeric(final_df["Sales"], errors="coerce").fillna(0)
-final_df["Sales_Display"] = final_df["Sales"].map("${:,.2f}".format)
-final_df["Profit"] = final_df.apply(
-    lambda r: r["Sales"] - r["Material Cost"] if r["Type"] == "Engines" else r["Sales"] * 0.10,
-    axis=1,
-)
-final_df["Material Cost"] = pd.to_numeric(final_df["Material Cost"], errors="coerce").fillna(0)
+# Apply mechanic filter
+final_df = date_filtered_df[date_filtered_df["Mechanic"].isin(selected_mechanics)].copy()
 
 # -----------------------------
 # Dashboard Title and Logo
@@ -136,30 +68,27 @@ col1, col2 = st.columns([4, 1])
 with col1:
     st.markdown("""<div style='display: flex; align-items: center;'>
     <img src='https://i.ibb.co/LDb6pmJd/2023-logo-new-NO-SPARKS.png' width='200' style='margin-right: 20px'>
-    <h2 style='color: #1e90ff;'>SAC Sales & Activity Dashboard</h2>
+    <h2 style='color: #1e90ff;'>SAC Mods Dashboard</h2>
 </div>
 """, unsafe_allow_html=True)
 
 # -----------------------------
 # Summary Metrics
 # -----------------------------
-# -----------------------------
-# Summary Metrics (Updated with Composition)
-# -----------------------------
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     total_sales = final_df["Sales"].sum()
-    st.metric("Total Sales (RRP)", f"${total_sales:,.2f}")
+    st.metric("Total Sales", f"${total_sales:,.2f}")
 
 with col2:
     total_transactions = len(final_df)
     st.metric("Transactions", total_transactions)
 
 with col3:
-    if not final_df.empty and final_df["Staff Name"].notnull().any():
-        top_staff = final_df.groupby("Staff Name")["Sales"].sum().idxmax()
-        top_sales = final_df.groupby("Staff Name")["Sales"].sum().max()
+    if not final_df.empty and final_df["Mechanic"].notnull().any():
+        top_staff = final_df.groupby("Mechanic")["Sales"].sum().idxmax()
+        top_sales = final_df.groupby("Mechanic")["Sales"].sum().max()
     else:
         top_staff = "N/A"
         top_sales = 0
@@ -168,14 +97,6 @@ with col3:
 with col4:
     total_profit = final_df["Profit"].sum()
     st.metric("Total Profit", f"${total_profit:,.2f}")
-
-with col5:
-    # Composition of sales between Mods and Engines
-    type_breakdown = final_df.groupby("Type")["Sales"].sum()
-    mods_pct = (type_breakdown.get("Mods", 0) / total_sales) * 100 if total_sales else 0
-    engines_pct = (type_breakdown.get("Engines", 0) / total_sales) * 100 if total_sales else 0
-    comp_label = f"{engines_pct:.0f}% Engines | {mods_pct:.0f}% Mods"
-    st.metric("Sales Composition", comp_label)
 
 st.write("")
 
@@ -198,72 +119,76 @@ st.altair_chart(line_chart, use_container_width=True)
 st.write("")
 
 # -----------------------------
-# Sales by Staff Bar Chart
+# Sales & Pay by Staff
 # -----------------------------
 st.subheader("Sales & Pay by Staff")
 
-# Compute Sales and Pay
-sales_pay_df = final_df.copy()
-sales_pay_df["Pay"] = sales_pay_df.apply(lambda r: r["Sales"] * 0.30 if r["Type"] == "Engines" else r["Sales"] * 0.10, axis=1)
-
-# Aggregate
 staff_combined = (
-    sales_pay_df.groupby("Staff Name")[["Sales", "Pay"]]
+    final_df.groupby("Mechanic")[["Sales", "Pay"]]
     .sum()
     .reset_index()
-    .melt(id_vars="Staff Name", var_name="Metric", value_name="Amount")
+    .melt(id_vars="Mechanic", var_name="Metric", value_name="Amount")
 )
 
-# Sort by Sales for consistent order
 sort_order = (
     staff_combined[staff_combined["Metric"] == "Sales"]
-    .sort_values("Amount", ascending=False)["Staff Name"]
+    .sort_values("Amount", ascending=False)["Mechanic"]
     .tolist()
 )
 
-# Chart
 combined_chart = alt.Chart(staff_combined).mark_bar().encode(
     x=alt.X("Amount:Q", title="Amount", axis=alt.Axis(format="$,.0f")),
-    y=alt.Y("Staff Name:N", sort=sort_order, title="Staff Member"),
+    y=alt.Y("Mechanic:N", sort=sort_order, title="Mechanic"),
     color=alt.Color("Metric:N", scale=alt.Scale(domain=["Sales", "Pay"], range=["#1f77b4", "#ff7f0e"])),
     tooltip=[
-        alt.Tooltip("Staff Name:N", title="Staff"),
+        alt.Tooltip("Mechanic:N", title="Mechanic"),
         alt.Tooltip("Metric:N", title="Type"),
         alt.Tooltip("Amount:Q", title="Value", format="$,.2f"),
     ],
 ).properties(height=800)
 
 st.altair_chart(combined_chart, use_container_width=True)
-# -----------------------------
-# Profit Margin by Item (Manually Color-Coded Red/Green)
-# -----------------------------
-st.subheader("Profit Margin")
 
-# Label mods separately
-final_df["Profit_Item"] = final_df.apply(lambda r: "Mods" if r["Type"] == "Mods" else r["Item"], axis=1)
+# -----------------------------
+# Pay Summary Table
+# -----------------------------
+st.subheader("Pay Summary")
 
-profit_by_item = (
-    final_df.groupby("Profit_Item")[["Profit", "Sales"]]
+staff_summary = (
+    final_df.groupby("Mechanic")[["Sales", "Pay"]]
     .sum()
     .reset_index()
-    .rename(columns={"Profit_Item": "Item"})
+    .sort_values(by="Sales", ascending=False)
 )
 
-# Top 10 by absolute profit
+staff_summary["Sales"] = staff_summary["Sales"].map("${:,.2f}".format)
+staff_summary["Pay"] = staff_summary["Pay"].map("${:,.2f}".format)
+
+st.dataframe(staff_summary, use_container_width=True, hide_index=True)
+
+# -----------------------------
+# Profit Margin by Service
+# -----------------------------
+st.subheader("Profit Margin by Service")
+
+profit_by_item = (
+    final_df.groupby("Item")[["Profit", "Sales"]]
+    .sum()
+    .reset_index()
+)
+
 top_profit_items = profit_by_item.reindex(
     profit_by_item["Profit"].abs().sort_values(ascending=False).index
 ).head(10)
 
-# Add color column manually
 top_profit_items["Color"] = top_profit_items["Profit"].apply(lambda x: "green" if x >= 0 else "red")
 
-# Final bar chart with hard-coded color
 profit_chart = alt.Chart(top_profit_items).mark_bar().encode(
     x=alt.X("Profit:Q", title="Total Profit", axis=alt.Axis(format="$,.0f")),
-    y=alt.Y("Item:N", sort="-x", title="Item"),
+    y=alt.Y("Item:N", sort="-x", title="Service"),
     color=alt.Color("Color:N", scale=alt.Scale(domain=["green", "red"], range=["#3CB371", "#FF6347"]), legend=None),
     tooltip=[
-        alt.Tooltip("Item", title="Item"),
+        alt.Tooltip("Item", title="Service"),
         alt.Tooltip("Profit", title="Total Profit", format="$,.2f"),
     ]
 ).properties(height=400)
@@ -275,37 +200,30 @@ st.altair_chart(profit_chart, use_container_width=True)
 # -----------------------------
 st.subheader("Staff Activity Overview")
 
-# Extract day and hour
 activity_df = final_df.copy()
 activity_df["Date"] = activity_df["Timestamp"].dt.date
-activity_df["Hour"] = activity_df["Timestamp"].dt.strftime("%Y-%m-%d %H")  # combines day + hour
+activity_df["Hour"] = activity_df["Timestamp"].dt.strftime("%Y-%m-%d %H")
 
-# Count unique days per staff
-days_active = activity_df.groupby("Staff Name")["Date"].nunique().reset_index().rename(columns={"Date": "Active Days"})
+days_active = activity_df.groupby("Mechanic")["Date"].nunique().reset_index().rename(columns={"Date": "Active Days"})
+hours_active = activity_df.groupby("Mechanic")["Hour"].nunique().reset_index().rename(columns={"Hour": "Active Hours"})
+activity_summary = pd.merge(days_active, hours_active, on="Mechanic")
 
-# Count unique hours per staff
-hours_active = activity_df.groupby("Staff Name")["Hour"].nunique().reset_index().rename(columns={"Hour": "Active Hours"})
-
-# Merge for alignment
-activity_summary = pd.merge(days_active, hours_active, on="Staff Name")
-
-# Charts side by side
 col1, col2 = st.columns(2)
 
 with col1:
     days_chart = alt.Chart(activity_summary).mark_bar().encode(
         x=alt.X("Active Days:Q", title="Days"),
-        y=alt.Y("Staff Name:N", sort="-x", title="Staff"),
-        tooltip=["Staff Name", "Active Days"]
-    ).properties(height=400, title="🗓️ Active Days per Staff")
+        y=alt.Y("Mechanic:N", sort="-x", title="Mechanic"),
+        tooltip=["Mechanic", "Active Days"]
+    ).properties(height=400, title="Active Days per Mechanic")
     st.altair_chart(days_chart, use_container_width=True)
 
 with col2:
     hours_chart = alt.Chart(activity_summary).mark_bar().encode(
         x=alt.X("Active Hours:Q", title="Hours"),
-        y=alt.Y("Staff Name:N", sort="-x", title="Staff"),
-        tooltip=["Staff Name", "Active Hours"]
-    ).properties(height=400, title="⏱️ Active Hours per Staff")
+        y=alt.Y("Mechanic:N", sort="-x", title="Mechanic"),
+        tooltip=["Mechanic", "Active Hours"]
+    ).properties(height=400, title="Active Hours per Mechanic")
     st.altair_chart(hours_chart, use_container_width=True)
 
 # -----------------------------
@@ -333,14 +251,238 @@ customer_chart = alt.Chart(sales_by_customer).mark_bar().encode(
 st.altair_chart(customer_chart, use_container_width=True)
 
 # -----------------------------
-# Transaction Table Display
+# Transactions Table
 # -----------------------------
-final_df = final_df.sort_values(by="Timestamp", ascending=False)
+st.subheader("Transactions")
 
-display_cols = ["Timestamp", "Staff Name", "Item", "Customer Name", "Sales", "Type"]
-display_df = final_df[display_cols].copy()
+display_df = final_df[["Timestamp", "Mechanic", "Item", "Customer Name", "Sales"]].copy()
+display_df = display_df.sort_values(by="Timestamp", ascending=False)
 display_df["Timestamp"] = display_df["Timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S").fillna("No Timestamp")
 display_df["Sales"] = display_df["Sales"].map("${:,.2f}".format)
 
-st.subheader("Transactions")
 st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+# -----------------------------
+# Revenue by Vehicle
+# -----------------------------
+st.subheader("Revenue by Vehicle")
+
+sales_by_vehicle = (
+    final_df.groupby("Vehicle")["Sales"]
+    .sum()
+    .reset_index()
+    .sort_values(by="Sales", ascending=False)
+    .head(15)
+)
+
+max_sales_vehicle = sales_by_vehicle["Sales"].max() if not sales_by_vehicle.empty else 0
+
+vehicle_chart = alt.Chart(sales_by_vehicle).mark_bar().encode(
+    x=alt.X("Sales:Q", title="Total Revenue", axis=alt.Axis(format="$,.0f")),
+    y=alt.Y("Vehicle:N", sort="-x", title="Vehicle"),
+    tooltip=["Vehicle", alt.Tooltip("Sales", format="$,.2f")],
+).properties(height=500)
+
+st.altair_chart(vehicle_chart, use_container_width=True)
+
+# -----------------------------
+# Activity Heatmap: Day of Week vs Hour
+# -----------------------------
+st.subheader("Activity Heatmap")
+
+heatmap_df = final_df.copy()
+heatmap_df["DayOfWeek"] = heatmap_df["Timestamp"].dt.day_name()
+heatmap_df["HourOfDay"] = heatmap_df["Timestamp"].dt.hour
+
+day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+heatmap_agg = (
+    heatmap_df.groupby(["DayOfWeek", "HourOfDay"])
+    .size()
+    .reset_index(name="Transactions")
+)
+
+heatmap = alt.Chart(heatmap_agg).mark_rect().encode(
+    x=alt.X("HourOfDay:O", title="Hour of Day"),
+    y=alt.Y("DayOfWeek:N", sort=day_order, title="Day of Week"),
+    color=alt.Color("Transactions:Q", scale=alt.Scale(scheme="blues"), title="Transactions"),
+    tooltip=[
+        alt.Tooltip("DayOfWeek:N", title="Day"),
+        alt.Tooltip("HourOfDay:O", title="Hour"),
+        alt.Tooltip("Transactions:Q", title="Transactions"),
+    ]
+).properties(height=300)
+
+st.altair_chart(heatmap, use_container_width=True)
+
+# -----------------------------
+# Average Transaction Value by Mechanic
+# -----------------------------
+st.subheader("Average Transaction Value by Mechanic")
+
+avg_by_mechanic = (
+    final_df.groupby("Mechanic")["Sales"]
+    .agg(["mean", "count"])
+    .reset_index()
+    .rename(columns={"mean": "Avg Transaction", "count": "Transactions"})
+    .sort_values(by="Avg Transaction", ascending=False)
+)
+
+avg_chart = alt.Chart(avg_by_mechanic).mark_bar().encode(
+    x=alt.X("Avg Transaction:Q", title="Avg Transaction Value", axis=alt.Axis(format="$,.0f")),
+    y=alt.Y("Mechanic:N", sort="-x", title="Mechanic"),
+    color=alt.Color("Transactions:Q", scale=alt.Scale(scheme="oranges"), title="# Transactions"),
+    tooltip=[
+        alt.Tooltip("Mechanic:N", title="Mechanic"),
+        alt.Tooltip("Avg Transaction:Q", title="Avg Value", format="$,.2f"),
+        alt.Tooltip("Transactions:Q", title="Transactions"),
+    ],
+).properties(height=400)
+
+st.altair_chart(avg_chart, use_container_width=True)
+
+# -----------------------------
+# Cumulative Sales Over Time
+# -----------------------------
+st.subheader("Cumulative Sales Over Time")
+
+cumulative_df = final_df.groupby(final_df["Timestamp"].dt.date)["Sales"].sum().reset_index()
+cumulative_df.rename(columns={"Timestamp": "Date"}, inplace=True)
+cumulative_df = cumulative_df.sort_values("Date")
+cumulative_df["Cumulative Sales"] = cumulative_df["Sales"].cumsum()
+
+area_chart = alt.Chart(cumulative_df).mark_area(
+    line=True,
+    opacity=0.4,
+    color="#1e90ff"
+).encode(
+    x=alt.X("Date:T", title=None, axis=alt.Axis(format="%d/%m")),
+    y=alt.Y("Cumulative Sales:Q", title="Cumulative Sales", axis=alt.Axis(format="$,.0f")),
+    tooltip=[
+        alt.Tooltip("Date:T", title="Date", format="%d/%m"),
+        alt.Tooltip("Sales:Q", title="Daily Sales", format="$,.2f"),
+        alt.Tooltip("Cumulative Sales:Q", title="Cumulative", format="$,.2f"),
+    ],
+).properties(height=400)
+
+st.altair_chart(area_chart, use_container_width=True)
+
+# -----------------------------
+# Mechanic Leaderboard
+# -----------------------------
+st.subheader("Mechanic Leaderboard")
+
+leaderboard = (
+    final_df.groupby("Mechanic")
+    .agg(
+        Transactions=("Sales", "size"),
+        Total_Sales=("Sales", "sum"),
+        Avg_Per_Transaction=("Sales", "mean"),
+    )
+    .reset_index()
+    .sort_values(by="Total_Sales", ascending=False)
+    .reset_index(drop=True)
+)
+
+leaderboard.index = leaderboard.index + 1
+leaderboard.index.name = "Rank"
+
+# Merge in active days
+lb_days = final_df.copy()
+lb_days["Date"] = lb_days["Timestamp"].dt.date
+days_per_mechanic = lb_days.groupby("Mechanic")["Date"].nunique().reset_index().rename(columns={"Date": "Active Days"})
+leaderboard = leaderboard.merge(days_per_mechanic, on="Mechanic", how="left")
+
+leaderboard["Total Sales"] = leaderboard["Total_Sales"].map("${:,.2f}".format)
+leaderboard["Avg / Transaction"] = leaderboard["Avg_Per_Transaction"].map("${:,.2f}".format)
+leaderboard = leaderboard[["Mechanic", "Transactions", "Total Sales", "Avg / Transaction", "Active Days"]]
+
+st.dataframe(leaderboard, use_container_width=True)
+
+# -----------------------------
+# Customer Retention / Repeat Customers
+# -----------------------------
+st.subheader("Customer Retention")
+
+visit_counts = (
+    final_df.groupby("Customer Name")
+    .size()
+    .reset_index(name="Visits")
+)
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.caption("Visit Frequency Distribution")
+    visit_hist = alt.Chart(visit_counts).mark_bar().encode(
+        x=alt.X("Visits:Q", bin=alt.Bin(maxbins=20), title="Number of Visits"),
+        y=alt.Y("count():Q", title="Number of Customers"),
+        tooltip=[
+            alt.Tooltip("Visits:Q", bin=alt.Bin(maxbins=20), title="Visits"),
+            alt.Tooltip("count():Q", title="Customers"),
+        ]
+    ).properties(height=400)
+    st.altair_chart(visit_hist, use_container_width=True)
+
+with col2:
+    st.caption("Top Repeat Customers")
+    top_repeats = visit_counts.sort_values("Visits", ascending=False).head(15)
+    repeat_chart = alt.Chart(top_repeats).mark_bar().encode(
+        x=alt.X("Visits:Q", title="Total Visits"),
+        y=alt.Y("Customer Name:N", sort="-x", title="Customer"),
+        tooltip=["Customer Name", "Visits"],
+    ).properties(height=400)
+    st.altair_chart(repeat_chart, use_container_width=True)
+
+# -----------------------------
+# Self-Service Detection (Mechanic worked on own car)
+# -----------------------------
+st.subheader("Self-Service Detection")
+st.caption("Transactions where the Mechanic name matches the Customer name")
+
+self_service = final_df[
+    final_df["Mechanic"].str.lower().str.strip()
+    == final_df["Customer Name"].str.lower().str.strip()
+].copy()
+
+if self_service.empty:
+    st.info("No self-service transactions found in the selected period.")
+else:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Self-Service Transactions", len(self_service))
+    with col2:
+        self_revenue = self_service["Sales"].sum()
+        st.metric("Self-Service Revenue", f"${self_revenue:,.2f}")
+    with col3:
+        pct = (len(self_service) / len(final_df)) * 100 if len(final_df) > 0 else 0
+        st.metric("% of All Transactions", f"{pct:.1f}%")
+
+    # Count by mechanic
+    self_by_mechanic = (
+        self_service.groupby("Mechanic")
+        .agg(Count=("Sales", "size"), Revenue=("Sales", "sum"))
+        .reset_index()
+        .sort_values(by="Count", ascending=False)
+    )
+
+    self_chart = alt.Chart(self_by_mechanic).mark_bar().encode(
+        x=alt.X("Count:Q", title="Self-Service Transactions"),
+        y=alt.Y("Mechanic:N", sort="-x", title="Mechanic"),
+        color=alt.value("#e74c3c"),
+        tooltip=[
+            alt.Tooltip("Mechanic:N", title="Mechanic"),
+            alt.Tooltip("Count:Q", title="Transactions"),
+            alt.Tooltip("Revenue:Q", title="Revenue", format="$,.2f"),
+        ],
+    ).properties(height=max(200, len(self_by_mechanic) * 40))
+
+    st.altair_chart(self_chart, use_container_width=True)
+
+    # Full transaction table
+    st.caption("Transaction Detail")
+    self_display = self_service[["Timestamp", "Mechanic", "Customer Name", "Vehicle", "Item", "Sales"]].copy()
+    self_display = self_display.sort_values(by="Timestamp", ascending=False)
+    self_display["Timestamp"] = self_display["Timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S").fillna("No Timestamp")
+    self_display["Sales"] = self_display["Sales"].map("${:,.2f}".format)
+    st.dataframe(self_display, use_container_width=True, hide_index=True)
