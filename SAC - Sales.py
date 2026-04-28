@@ -251,12 +251,43 @@ customer_chart = alt.Chart(sales_by_customer).mark_bar().encode(
 st.altair_chart(customer_chart, use_container_width=True)
 
 # -----------------------------
-# Transactions Table
+# Transactions Table (with Search & Filters)
 # -----------------------------
 st.subheader("Transactions")
 
-display_df = final_df[["Timestamp", "Mechanic", "Item", "Customer Name", "Sales"]].copy()
+display_df = final_df[["Timestamp", "Mechanic", "Item", "Vehicle", "Customer Name", "Sales"]].copy()
 display_df = display_df.sort_values(by="Timestamp", ascending=False)
+
+# Search and filter controls
+search_col1, search_col2, search_col3 = st.columns([2, 1, 1])
+
+with search_col1:
+    search_text = st.text_input("Search logs", placeholder="Search by mechanic, customer, vehicle, or service...")
+
+with search_col2:
+    vehicle_options = ["All"] + sorted(display_df["Vehicle"].dropna().unique().tolist())
+    vehicle_filter = st.selectbox("Filter by Vehicle", options=vehicle_options)
+
+with search_col3:
+    service_options = ["All"] + sorted(display_df["Item"].dropna().unique().tolist())
+    service_filter = st.selectbox("Filter by Service", options=service_options)
+
+# Apply text search (case-insensitive across all text columns)
+if search_text:
+    mask = display_df.apply(
+        lambda row: search_text.lower() in " ".join(row.astype(str).values).lower(),
+        axis=1
+    )
+    display_df = display_df[mask]
+
+# Apply dropdown filters
+if vehicle_filter != "All":
+    display_df = display_df[display_df["Vehicle"] == vehicle_filter]
+if service_filter != "All":
+    display_df = display_df[display_df["Item"] == service_filter]
+
+st.caption(f"Showing {len(display_df)} transactions")
+
 display_df["Timestamp"] = display_df["Timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S").fillna("No Timestamp")
 display_df["Sales"] = display_df["Sales"].map("${:,.2f}".format)
 
