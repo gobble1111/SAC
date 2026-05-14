@@ -517,3 +517,109 @@ else:
     self_display["Timestamp"] = self_display["Timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S").fillna("No Timestamp")
     self_display["Sales"] = self_display["Sales"].map("${:,.2f}".format)
     st.dataframe(self_display, use_container_width=True, hide_index=True)
+
+# -----------------------------
+# Employee of the Month
+# -----------------------------
+st.markdown("---")
+st.subheader("Employee of the Month")
+
+# Exclude self-service transactions (mechanic working on own car)
+customer_sales_df = final_df[
+    final_df["Mechanic"].str.lower().str.strip()
+    != final_df["Customer Name"].str.lower().str.strip()
+].copy()
+
+# Sales to customers (excluding own cars)
+eom_sales = (
+    customer_sales_df.groupby("Mechanic")["Sales"]
+    .sum()
+    .reset_index()
+    .rename(columns={"Sales": "Customer Sales"})
+)
+
+# Active hours in shop
+eom_hours_df = final_df.copy()
+eom_hours_df["Hour"] = eom_hours_df["Timestamp"].dt.strftime("%Y-%m-%d %H")
+eom_hours = (
+    eom_hours_df.groupby("Mechanic")["Hour"]
+    .nunique()
+    .reset_index()
+    .rename(columns={"Hour": "Active Hours"})
+)
+
+# Merge and score
+eom = pd.merge(eom_sales, eom_hours, on="Mechanic", how="outer").fillna(0)
+
+if not eom.empty and len(eom) > 0:
+    # Normalize each metric to 0-100 scale
+    max_sales = eom["Customer Sales"].max()
+    max_hours = eom["Active Hours"].max()
+
+    eom["Sales Score"] = (eom["Customer Sales"] / max_sales * 100) if max_sales > 0 else 0
+    eom["Hours Score"] = (eom["Active Hours"] / max_hours * 100) if max_hours > 0 else 0
+
+    # Weighted composite: 75% sales, 25% hours
+    eom["Final Score"] = (eom["Sales Score"] * 0.75) + (eom["Hours Score"] * 0.25)
+    eom = eom.sort_values("Final Score", ascending=False).reset_index(drop=True)
+
+    winner = eom.iloc[0]
+
+    # Trophy display
+    st.markdown(
+        f"""
+        <div style='text-align: center; padding: 30px; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+                    border-radius: 16px; border: 2px solid #e2b714; margin-bottom: 20px;'>
+            <div style='font-size: 64px; margin-bottom: 10px;'>&#127942;</div>
+            <div style='font-size: 32px; font-weight: bold; color: #e2b714;'>{winner["Mechanic"]}</div>
+            <div style='font-size: 16px; color: #ccc; margin-top: 8px;'>
+                Customer Sales: ${winner["Customer Sales"]:,.2f} &nbsp;|&nbsp; Active Hours: {int(winner["Active Hours"])}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Transparency: show full breakdown
+    with st.expander("How was this determined?"):
+        st.markdown("""
+**Scoring Method**
+- **75% weighting** — Customer Sales (self-service transactions excluded)
+- **25% weighting** — Active Hours in Shop (unique hours with at least one transaction)
+
+Each metric is normalized to a 0–100 scale (best performer = 100), then combined using the weights above.
+Self-service transactions (where Mechanic = Customer) are excluded from the sales component to ensure the score reflects genuine customer work.
+        """)
+
+        # Show the scored table
+        eom_display = eom.copy()
+        eom_display.index = eom_display.index + 1
+        eom_display.index.name = "Rank"
+        eom_display["Customer Sales"] = eom_display["Customer Sales"].map("${:,.2f}".format)
+        eom_display["Active Hours"] = eom_display["Active Hours"].astype(int)
+        eom_display["Sales Score"] = eom_display["Sales Score"].map("{:.1f}".format)
+        eom_display["Hours Score"] = eom_display["Hours Score"].map("{:.1f}".format)
+        eom_display["Final Score"] = eom_display["Final Score"].map("{:.1f}".format)
+
+        st.dataframe(eom_display, use_container_width=True)
+
+        # Bar chart of final scores
+        score_chart = alt.Chart(eom).mark_bar().encode(
+            x=alt.X("Final Score:Q", title="Weighted Score (0–100)"),
+            y=alt.Y("Mechanic:N", sort="-x", title="Mechanic"),
+            color=alt.condition(
+                alt.datum.Mechanic == winner["Mechanic"],
+                alt.value("#e2b714"),
+                alt.value("#1f77b4"),
+            ),
+            tooltip=[
+                alt.Tooltip("Mechanic:N", title="Mechanic"),
+                alt.Tooltip("Customer Sales:Q", title="Customer Sales", format="$,.2f"),
+                alt.Tooltip("Active Hours:Q", title="Active Hours"),
+                alt.Tooltip("Final Score:Q", title="Score", format=".1f"),
+            ],
+        ).properties(height=max(200, len(eom) * 40))
+
+        st.altair_chart(score_chart, use_container_width=True)
+else:
+    st.info("Not enough data to determine Employee of the Month.")
