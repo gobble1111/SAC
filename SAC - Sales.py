@@ -33,10 +33,19 @@ brisbane_tz = pytz.timezone("Australia/Brisbane")
 mods_df["Timestamp"] = mods_df["Timestamp"].dt.tz_convert(brisbane_tz).dt.tz_localize(None)
 
 # Financials
+# Commission rates changed on 2026-06-01: worker pay and shop profit moved from 10%/10% to 25%/25%.
 mods_df["Sales"] = mods_df["Sales"].replace(r'[\$,]', '', regex=True).astype(float)
-mods_df["Profit"] = mods_df["Sales"] * 0.10
-mods_df["Material Cost"] = mods_df["Sales"] * 0.80
-mods_df["Pay"] = mods_df["Sales"] * 0.10
+
+commission_change_date = pd.Timestamp("2026-06-01")
+new_rate_mask = mods_df["Timestamp"] >= commission_change_date
+
+pay_rate = new_rate_mask.map({True: 0.25, False: 0.10})
+profit_rate = new_rate_mask.map({True: 0.25, False: 0.10})
+material_rate = new_rate_mask.map({True: 0.50, False: 0.80})
+
+mods_df["Pay"] = mods_df["Sales"] * pay_rate
+mods_df["Profit"] = mods_df["Sales"] * profit_rate
+mods_df["Material Cost"] = mods_df["Sales"] * material_rate
 
 # -----------------------------
 # Sidebar Filters
