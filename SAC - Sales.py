@@ -33,15 +33,27 @@ brisbane_tz = pytz.timezone("Australia/Brisbane")
 mods_df["Timestamp"] = mods_df["Timestamp"].dt.tz_convert(brisbane_tz).dt.tz_localize(None)
 
 # Financials
-# Commission rates changed on 2026-06-01: worker pay and shop profit moved from 10%/10% to 25%/25%.
+# Commission rate tiers (Pay / Profit / Material):
+#   Before 2026-06-01:        10% / 10% / 80%
+#   2026-06-01 to 2026-06-20: 25% / 25% / 50%
+#   From 2026-06-21:          15% / 10% / 75%
 mods_df["Sales"] = mods_df["Sales"].replace(r'[\$,]', '', regex=True).astype(float)
 
-commission_change_date = pd.Timestamp("2026-06-01")
-new_rate_mask = mods_df["Timestamp"] >= commission_change_date
+ts = mods_df["Timestamp"]
+tier_june = (ts >= pd.Timestamp("2026-06-01")) & (ts < pd.Timestamp("2026-06-21"))
+tier_late_june = ts >= pd.Timestamp("2026-06-21")
 
-pay_rate = new_rate_mask.map({True: 0.25, False: 0.10})
-profit_rate = new_rate_mask.map({True: 0.25, False: 0.10})
-material_rate = new_rate_mask.map({True: 0.50, False: 0.80})
+pay_rate = pd.Series(0.10, index=mods_df.index)
+pay_rate[tier_june] = 0.25
+pay_rate[tier_late_june] = 0.15
+
+profit_rate = pd.Series(0.10, index=mods_df.index)
+profit_rate[tier_june] = 0.25
+profit_rate[tier_late_june] = 0.10
+
+material_rate = pd.Series(0.80, index=mods_df.index)
+material_rate[tier_june] = 0.50
+material_rate[tier_late_june] = 0.75
 
 mods_df["Pay"] = mods_df["Sales"] * pay_rate
 mods_df["Profit"] = mods_df["Sales"] * profit_rate
