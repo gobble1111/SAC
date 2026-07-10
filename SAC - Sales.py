@@ -15,6 +15,8 @@ logs_url = "https://docs.google.com/spreadsheets/d/1RkQTTAAizRMHTsn7hnClowbob5rY
 # -----------------------------
 logs = pd.read_csv(logs_url)
 
+# The sheet occasionally has a trailing unnamed column; keep only the first 6.
+logs = logs.iloc[:, :6]
 logs.columns = ['Timestamp', 'Player', 'Vehicle', 'Service', 'Price', 'Mechanic']
 
 # -----------------------------
