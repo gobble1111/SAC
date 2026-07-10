@@ -18,6 +18,8 @@ PRIZE_AMOUNT = "1,000,000"
 # Load Data
 # -----------------------------
 logs = pd.read_csv(logs_url)
+# The sheet occasionally has a trailing unnamed column; keep only the first 6.
+logs = logs.iloc[:, :6]
 logs.columns = ['Timestamp', 'Player', 'Vehicle', 'Service', 'Price', 'Mechanic']
 
 mods_df = logs.rename(columns={
