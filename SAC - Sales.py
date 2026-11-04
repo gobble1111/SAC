@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import pytz
+import requests
+from io import StringIO
 
 # -----------------------------
 # Config and URLs
@@ -13,7 +15,25 @@ logs_url = "https://docs.google.com/spreadsheets/d/1RkQTTAAizRMHTsn7hnClowbob5rY
 # -----------------------------
 # Load Data
 # -----------------------------
-logs = pd.read_csv(logs_url)
+@st.cache_data(ttl=300)
+def load_sheet(url: str) -> pd.DataFrame:
+    # Google sometimes rejects the default urllib UA; use a browser UA and follow redirects.
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; SAC-Dashboard/1.0)"}
+    resp = requests.get(url, headers=headers, allow_redirects=True, timeout=30)
+    resp.raise_for_status()
+    return pd.read_csv(StringIO(resp.text))
+
+try:
+    logs = load_sheet(logs_url)
+except requests.HTTPError as e:
+    st.error(
+        f"Could not load data from Google Sheets (HTTP {e.response.status_code}). "
+        "Make sure the sheet is shared as 'Anyone with the link can view'."
+    )
+    st.stop()
+except requests.RequestException as e:
+    st.error(f"Network error loading data: {e}")
+    st.stop()
 
 # The sheet occasionally has a trailing unnamed column; keep only the first 6.
 logs = logs.iloc[:, :6]
