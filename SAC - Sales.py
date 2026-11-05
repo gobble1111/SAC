@@ -2,41 +2,25 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import pytz
-import requests
-from io import StringIO
+import os
+import sqlite3
 
 # -----------------------------
 # Config and URLs
 # -----------------------------
 st.set_page_config(page_title="SAC Mods Dashboard", layout="wide")
 
-logs_url = "https://docs.google.com/spreadsheets/d/1RkQTTAAizRMHTsn7hnClowbob5rYE0zM6riGguTK0Bs/export?format=csv&gid=316444388"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sac.db")
 
 # -----------------------------
-# Load Data
+# Load Data (SQLite written by collector.py)
 # -----------------------------
-@st.cache_data(ttl=300)
-def load_sheet(url: str) -> pd.DataFrame:
-    # Google sometimes rejects the default urllib UA; use a browser UA and follow redirects.
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; SAC-Dashboard/1.0)"}
-    resp = requests.get(url, headers=headers, allow_redirects=True, timeout=30)
-    resp.raise_for_status()
-    return pd.read_csv(StringIO(resp.text))
+@st.cache_data(ttl=60)
+def load_logs() -> pd.DataFrame:
+    with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
+        return pd.read_sql("SELECT ts, player, vehicle, service, price, mechanic FROM logs ORDER BY ts", con)
 
-try:
-    logs = load_sheet(logs_url)
-except requests.HTTPError as e:
-    st.error(
-        f"Could not load data from Google Sheets (HTTP {e.response.status_code}). "
-        "Make sure the sheet is shared as 'Anyone with the link can view'."
-    )
-    st.stop()
-except requests.RequestException as e:
-    st.error(f"Network error loading data: {e}")
-    st.stop()
-
-# The sheet occasionally has a trailing unnamed column; keep only the first 6.
-logs = logs.iloc[:, :6]
+logs = load_logs()
 logs.columns = ['Timestamp', 'Player', 'Vehicle', 'Service', 'Price', 'Mechanic']
 
 # -----------------------------

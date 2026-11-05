@@ -1,2 +1,5 @@
 /SAC - Sales - Engines.py
 /SAC - Sales - Mods.py
+.venv/
+.env
+data/

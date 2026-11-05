@@ -3,23 +3,29 @@ import pandas as pd
 import altair as alt
 import pytz
 import json
+import os
+import sqlite3
 
 # -----------------------------
 # Config and URLs
 # -----------------------------
 st.set_page_config(page_title="SAC Weekly Prize Draw", layout="wide")
 
-logs_url = "https://docs.google.com/spreadsheets/d/1RkQTTAAizRMHTsn7hnClowbob5rYE0zM6riGguTK0Bs/export?format=csv&gid=316444388"
 
 ENTRY_THRESHOLD = 25000
 PRIZE_AMOUNT = "1,000,000"
 
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sac.db")
+
 # -----------------------------
-# Load Data
+# Load Data (SQLite written by collector.py)
 # -----------------------------
-logs = pd.read_csv(logs_url)
-# The sheet occasionally has a trailing unnamed column; keep only the first 6.
-logs = logs.iloc[:, :6]
+@st.cache_data(ttl=60)
+def load_logs() -> pd.DataFrame:
+    with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
+        return pd.read_sql("SELECT ts, player, vehicle, service, price, mechanic FROM logs ORDER BY ts", con)
+
+logs = load_logs()
 logs.columns = ['Timestamp', 'Player', 'Vehicle', 'Service', 'Price', 'Mechanic']
 
 mods_df = logs.rename(columns={
