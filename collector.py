@@ -2,10 +2,11 @@
 """Polls a Discord channel for tuning embeds and stores one row per service in data/sac.db.
 
 Env: DISCORD_TOKEN, DISCORD_CHANNEL_ID, optional POLL_SECONDS (default 60).
+Optional PUBLISH_BRANCH: push a CSV snapshot as a single-commit branch on origin (for the cloud app).
 Rows are unique on (message_id, n) where n is the line's position in the bill, so
 re-reading history never duplicates but a bill listing the same service twice keeps both.
 """
-import json, os, re, sqlite3, sys, time, urllib.request
+import csv, io, json, os, re, sqlite3, subprocess, sys, time, urllib.request
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -13,6 +14,8 @@ DB = os.path.join(HERE, "data", "sac.db")
 TOKEN = os.environ["DISCORD_TOKEN"]
 CHANNEL = os.environ["DISCORD_CHANNEL_ID"]
 POLL = int(os.environ.get("POLL_SECONDS", "60"))
+PUBLISH_BRANCH = os.environ.get("PUBLISH_BRANCH")
+PUBLISH_SECONDS = int(os.environ.get("PUBLISH_SECONDS", "300"))
 # Start point when the database has no saved cursor (Discord snowflake for 2026-01-01 UTC).
 CUTOFF = str((int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp() * 1000) - 1420070400000) << 22)
 
@@ -76,6 +79,21 @@ def parse(message):
     return rows
 
 
+def publish(con):
+    """Force-push logs.csv as a one-commit orphan branch, so the repo history never grows."""
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(["Timestamp", "Player", "Vehicle", "Service", "Price", "Mechanic"])
+    w.writerows(con.execute("SELECT ts, player, vehicle, service, price, mechanic FROM logs ORDER BY ts, message_id, n"))
+    git = lambda *a, inp=None: subprocess.run(["git", *a], cwd=HERE, input=inp, text=True, check=True,
+                                               capture_output=True).stdout.strip()
+    blob = git("hash-object", "-w", "--stdin", inp=buf.getvalue())
+    tree = git("mktree", inp=f"100644 blob {blob}\tlogs.csv\n")
+    commit = git("commit-tree", tree, "-m", "data snapshot")
+    git("push", "-q", "-f", "origin", f"{commit}:refs/heads/{PUBLISH_BRANCH}")
+    print(f"published {buf.tell()} bytes to {PUBLISH_BRANCH}", flush=True)
+
+
 def main():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     con = sqlite3.connect(DB)
@@ -83,6 +101,7 @@ def main():
     row = con.execute("SELECT value FROM state WHERE key='cursor'").fetchone()
     cursor = row[0] if row else CUTOFF
     print(f"starting after {cursor}", flush=True)
+    dirty, published = bool(PUBLISH_BRANCH), 0.0
     while True:
         while True:
             msgs = sorted(fetch(cursor), key=lambda m: int(m["id"]))
@@ -94,10 +113,17 @@ def main():
                 cursor = msgs[-1]["id"]
                 con.execute("INSERT OR REPLACE INTO state VALUES ('cursor', ?)", (cursor,))
             if n:
+                dirty = True
                 print(f"{len(msgs)} messages -> {n} new rows (cursor {cursor})", flush=True)
             if len(msgs) < 100:
                 break
             time.sleep(1)
+        if dirty and PUBLISH_BRANCH and time.time() - published >= PUBLISH_SECONDS:
+            try:
+                publish(con)
+                dirty, published = False, time.time()
+            except subprocess.CalledProcessError as e:
+                print(f"publish failed: {e.stderr.strip()}", flush=True)
         if "--once" in sys.argv:
             return
         time.sleep(POLL)

@@ -15,8 +15,13 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sac.
 # -----------------------------
 # Load Data (SQLite written by collector.py)
 # -----------------------------
+# Published by collector.py (PUBLISH_BRANCH) for deployments that don't have the SQLite file.
+DATA_URL = "https://raw.githubusercontent.com/gobble1111/SAC/data/logs.csv"
+
 @st.cache_data(ttl=60)
 def load_logs() -> pd.DataFrame:
+    if not os.path.exists(DB_PATH):
+        return pd.read_csv(DATA_URL)
     with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
         return pd.read_sql("SELECT ts, player, vehicle, service, price, mechanic FROM logs ORDER BY ts", con)
 
