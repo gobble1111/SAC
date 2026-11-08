@@ -2,30 +2,41 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import pytz
-import os
-import sqlite3
+import requests
+from io import StringIO
 
 # -----------------------------
 # Config and URLs
 # -----------------------------
 st.set_page_config(page_title="SAC Mods Dashboard", layout="wide")
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sac.db")
+logs_url = "https://docs.google.com/spreadsheets/d/1RkQTTAAizRMHTsn7hnClowbob5rYE0zM6riGguTK0Bs/export?format=csv&gid=316444388"
 
 # -----------------------------
-# Load Data (SQLite written by collector.py)
+# Load Data
 # -----------------------------
-# Published by collector.py (PUBLISH_BRANCH) for deployments that don't have the SQLite file.
-DATA_URL = "https://raw.githubusercontent.com/gobble1111/SAC/data/logs.csv"
+@st.cache_data(ttl=300)
+def load_sheet(url: str) -> pd.DataFrame:
+    # Google sometimes rejects the default urllib UA; use a browser UA and follow redirects.
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; SAC-Dashboard/1.0)"}
+    resp = requests.get(url, headers=headers, allow_redirects=True, timeout=30)
+    resp.raise_for_status()
+    return pd.read_csv(StringIO(resp.text))
 
-@st.cache_data(ttl=60)
-def load_logs() -> pd.DataFrame:
-    if not os.path.exists(DB_PATH):
-        return pd.read_csv(DATA_URL)
-    with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
-        return pd.read_sql("SELECT ts, player, vehicle, service, price, mechanic FROM logs ORDER BY ts", con)
+try:
+    logs = load_sheet(logs_url)
+except requests.HTTPError as e:
+    st.error(
+        f"Could not load data from Google Sheets (HTTP {e.response.status_code}). "
+        "Make sure the sheet is shared as 'Anyone with the link can view'."
+    )
+    st.stop()
+except requests.RequestException as e:
+    st.error(f"Network error loading data: {e}")
+    st.stop()
 
-logs = load_logs()
+# The sheet occasionally has a trailing unnamed column; keep only the first 6.
+logs = logs.iloc[:, :6]
 logs.columns = ['Timestamp', 'Player', 'Vehicle', 'Service', 'Price', 'Mechanic']
 
 # -----------------------------
@@ -155,8 +166,23 @@ st.write("")
 # -----------------------------
 st.subheader("Sales & Pay by Staff")
 
+exclude_self_service = st.toggle(
+    "Exclude self-service (own cars)",
+    value=False,
+    help="When on, transactions where the Mechanic name matches the Customer name are excluded from this chart.",
+    key="exclude_self_service_sales_pay",
+)
+
+if exclude_self_service:
+    sales_pay_df = final_df[
+        final_df["Mechanic"].str.lower().str.strip()
+        != final_df["Customer Name"].str.lower().str.strip()
+    ]
+else:
+    sales_pay_df = final_df
+
 staff_combined = (
-    final_df.groupby("Mechanic")[["Sales", "Pay"]]
+    sales_pay_df.groupby("Mechanic")[["Sales", "Pay"]]
     .sum()
     .reset_index()
     .melt(id_vars="Mechanic", var_name="Metric", value_name="Amount")
