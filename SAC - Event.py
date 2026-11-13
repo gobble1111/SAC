@@ -5,6 +5,8 @@ import pytz
 import json
 import os
 import sqlite3
+import urllib.parse
+import urllib.request
 
 # -----------------------------
 # Config and URLs
@@ -20,18 +22,26 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sac.
 # -----------------------------
 # Load Data (SQLite written by collector.py)
 # -----------------------------
-# Published by collector.py (PUBLISH_BRANCH) for deployments that don't have the SQLite file.
-DATA_URL = "https://raw.githubusercontent.com/gobble1111/SAC/data/logs.csv"
+# Mirrored there by collector.py for deployments that don't have the SQLite file.
+FIREBASE_URL = "https://sac-logs-default-rtdb.asia-southeast1.firebasedatabase.app/logs.json"
+COLUMNS = ['Timestamp', 'Player', 'Vehicle', 'Service', 'Price', 'Mechanic']
 
-@st.cache_data(ttl=60)
+@st.cache_resource
+def _remote_rows() -> dict:
+    return {}  # key -> row, kept for the life of the process so refreshes only fetch new rows
+
+@st.cache_data(ttl=30)
 def load_logs() -> pd.DataFrame:
-    if not os.path.exists(DB_PATH):
-        return pd.read_csv(DATA_URL)
-    with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
-        return pd.read_sql("SELECT ts, player, vehicle, service, price, mechanic FROM logs ORDER BY ts", con)
+    if os.path.exists(DB_PATH):
+        with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
+            return pd.read_sql("SELECT ts, player, vehicle, service, price, mechanic FROM logs ORDER BY ts", con).set_axis(COLUMNS, axis=1)
+    rows = _remote_rows()
+    query = "?" + urllib.parse.urlencode({"orderBy": '"$key"', "startAfter": f'"{max(rows)}"'}) if rows else ""
+    with urllib.request.urlopen(FIREBASE_URL + query, timeout=60) as resp:
+        rows.update(json.load(resp) or {})
+    return pd.DataFrame([rows[k] for k in sorted(rows)], columns=COLUMNS)
 
 logs = load_logs()
-logs.columns = ['Timestamp', 'Player', 'Vehicle', 'Service', 'Price', 'Mechanic']
 
 mods_df = logs.rename(columns={
     "Player": "Customer Name",

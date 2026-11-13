@@ -2,42 +2,42 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import pytz
-import requests
-from io import StringIO
+import json
+import os
+import sqlite3
+import urllib.parse
+import urllib.request
 
 # -----------------------------
 # Config and URLs
 # -----------------------------
 st.set_page_config(page_title="SAC Mods Dashboard", layout="wide")
 
-logs_url = "https://docs.google.com/spreadsheets/d/1RkQTTAAizRMHTsn7hnClowbob5rYE0zM6riGguTK0Bs/export?format=csv&gid=316444388"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sac.db")
 
 # -----------------------------
-# Load Data
+# Load Data (SQLite written by collector.py)
 # -----------------------------
-@st.cache_data(ttl=300)
-def load_sheet(url: str) -> pd.DataFrame:
-    # Google sometimes rejects the default urllib UA; use a browser UA and follow redirects.
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; SAC-Dashboard/1.0)"}
-    resp = requests.get(url, headers=headers, allow_redirects=True, timeout=30)
-    resp.raise_for_status()
-    return pd.read_csv(StringIO(resp.text))
+# Mirrored there by collector.py for deployments that don't have the SQLite file.
+FIREBASE_URL = "https://sac-logs-default-rtdb.asia-southeast1.firebasedatabase.app/logs.json"
+COLUMNS = ['Timestamp', 'Player', 'Vehicle', 'Service', 'Price', 'Mechanic']
 
-try:
-    logs = load_sheet(logs_url)
-except requests.HTTPError as e:
-    st.error(
-        f"Could not load data from Google Sheets (HTTP {e.response.status_code}). "
-        "Make sure the sheet is shared as 'Anyone with the link can view'."
-    )
-    st.stop()
-except requests.RequestException as e:
-    st.error(f"Network error loading data: {e}")
-    st.stop()
+@st.cache_resource
+def _remote_rows() -> dict:
+    return {}  # key -> row, kept for the life of the process so refreshes only fetch new rows
 
-# The sheet occasionally has a trailing unnamed column; keep only the first 6.
-logs = logs.iloc[:, :6]
-logs.columns = ['Timestamp', 'Player', 'Vehicle', 'Service', 'Price', 'Mechanic']
+@st.cache_data(ttl=30)
+def load_logs() -> pd.DataFrame:
+    if os.path.exists(DB_PATH):
+        with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
+            return pd.read_sql("SELECT ts, player, vehicle, service, price, mechanic FROM logs ORDER BY ts", con).set_axis(COLUMNS, axis=1)
+    rows = _remote_rows()
+    query = "?" + urllib.parse.urlencode({"orderBy": '"$key"', "startAfter": f'"{max(rows)}"'}) if rows else ""
+    with urllib.request.urlopen(FIREBASE_URL + query, timeout=60) as resp:
+        rows.update(json.load(resp) or {})
+    return pd.DataFrame([rows[k] for k in sorted(rows)], columns=COLUMNS)
+
+logs = load_logs()
 
 # -----------------------------
 # Process Mods Data
