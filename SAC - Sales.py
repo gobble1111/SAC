@@ -19,23 +19,31 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sac.
 # Load Data (SQLite written by collector.py)
 # -----------------------------
 # Mirrored there by collector.py for deployments that don't have the SQLite file.
-FIREBASE_URL = "https://sac-logs-default-rtdb.asia-southeast1.firebasedatabase.app/logs.json"
+FIREBASE_URL = "https://sac-logs-default-rtdb.asia-southeast1.firebasedatabase.app"
 COLUMNS = ['Timestamp', 'Player', 'Vehicle', 'Service', 'Price', 'Mechanic']
+GARAGE_COLUMNS = ['Timestamp', 'Event', 'Player', 'Plate', 'Vehicle', 'Garage']
 
 @st.cache_resource
-def _remote_rows() -> dict:
+def _remote_rows(path: str) -> dict:
     return {}  # key -> row, kept for the life of the process so refreshes only fetch new rows
+
+def _load_table(path: str, sql: str, columns: list) -> pd.DataFrame:
+    if os.path.exists(DB_PATH):
+        with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
+            return pd.read_sql(sql, con).set_axis(columns, axis=1)
+    rows = _remote_rows(path)
+    query = "?" + urllib.parse.urlencode({"orderBy": '"$key"', "startAfter": f'"{max(rows)}"'}) if rows else ""
+    with urllib.request.urlopen(f"{FIREBASE_URL}/{path}.json{query}", timeout=60) as resp:
+        rows.update(json.load(resp) or {})
+    return pd.DataFrame([rows[k] for k in sorted(rows)], columns=columns)
 
 @st.cache_data(ttl=30)
 def load_logs() -> pd.DataFrame:
-    if os.path.exists(DB_PATH):
-        with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
-            return pd.read_sql("SELECT ts, player, vehicle, service, price, mechanic FROM logs ORDER BY ts", con).set_axis(COLUMNS, axis=1)
-    rows = _remote_rows()
-    query = "?" + urllib.parse.urlencode({"orderBy": '"$key"', "startAfter": f'"{max(rows)}"'}) if rows else ""
-    with urllib.request.urlopen(FIREBASE_URL + query, timeout=60) as resp:
-        rows.update(json.load(resp) or {})
-    return pd.DataFrame([rows[k] for k in sorted(rows)], columns=COLUMNS)
+    return _load_table("logs", "SELECT ts, player, vehicle, service, price, mechanic FROM logs ORDER BY ts", COLUMNS)
+
+@st.cache_data(ttl=30)
+def load_garage() -> pd.DataFrame:
+    return _load_table("garage", "SELECT ts, event, player, plate, vehicle, garage FROM garage ORDER BY ts", GARAGE_COLUMNS)
 
 logs = load_logs()
 
@@ -283,6 +291,114 @@ with col2:
         tooltip=["Mechanic", "Active Hours"]
     ).properties(height=400, title="Active Hours per Mechanic")
     st.altair_chart(hours_chart, use_container_width=True)
+
+# -----------------------------
+# Garage Usage (from #garage-logs)
+# -----------------------------
+st.subheader("Garage Usage")
+
+garage_df = load_garage()
+garage_df["Timestamp"] = pd.to_datetime(garage_df["Timestamp"], utc=True, errors="coerce")
+garage_df["Timestamp"] = garage_df["Timestamp"].dt.tz_convert(brisbane_tz).dt.tz_localize(None)
+now_local = pd.Timestamp.now(tz=brisbane_tz).tz_localize(None).floor("s")
+
+# Pair every "taken out" with the next event on the same plate to form a trip.
+trips = []
+for plate, events in garage_df.sort_values("Timestamp").groupby("Plate"):
+    current = None
+    for ev in events.itertuples(index=False):
+        if current is not None:
+            current.update(End=ev.Timestamp, Status="Returned" if ev.Event == "in" else "Return not logged",
+                           ReturnedBy=ev.Player if ev.Event == "in" else "")
+            trips.append(current)
+            current = None
+        if ev.Event == "out":
+            current = dict(Plate=plate, Vehicle=ev.Vehicle, Staff=ev.Player, Start=ev.Timestamp)
+    if current is not None:
+        current.update(End=now_local, Status="Still out", ReturnedBy="")
+        trips.append(current)
+
+trips_df = pd.DataFrame(trips, columns=["Plate", "Vehicle", "Staff", "Start", "End", "Status", "ReturnedBy"])
+trips_df["Hours"] = (trips_df["End"] - trips_df["Start"]).dt.total_seconds() / 3600
+trips_df["Label"] = trips_df["Vehicle"] + " (" + trips_df["Plate"] + ")"
+trip_mask = (trips_df["Start"].dt.date <= end_date) & (trips_df["End"].dt.date >= start_date)
+period_trips = trips_df.loc[trip_mask].copy()
+
+def fmt_hours(h: float) -> str:
+    mins = int(round(h * 60))
+    return f"{mins // 60}h {mins % 60:02d}m"
+
+if period_trips.empty:
+    st.info("No garage activity in this period.")
+else:
+    out_now = period_trips[period_trips["Status"] == "Still out"]
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric("Out Right Now", len(out_now))
+    g2.metric("Trips", len(period_trips))
+    g3.metric("Hours Out", fmt_hours(period_trips["Hours"].sum()))
+    g4.metric("Avg Trip", fmt_hours(period_trips["Hours"].mean()))
+
+    # Fixed colour per staff member, ordered by hours so the busiest get the leading hues.
+    staff_order = period_trips.groupby("Staff")["Hours"].sum().sort_values(ascending=False).index.tolist()
+    staff_colors = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
+    if len(staff_order) > len(staff_colors):
+        others = set(staff_order[len(staff_colors) - 1:])
+        period_trips["Staff"] = period_trips["Staff"].where(~period_trips["Staff"].isin(others), "Other")
+        staff_order = staff_order[:len(staff_colors) - 1] + ["Other"]
+    staff_scale = alt.Scale(domain=staff_order, range=staff_colors[:len(staff_order)])
+
+    gcol1, gcol2 = st.columns(2)
+    with gcol1:
+        by_staff = period_trips.groupby("Staff", as_index=False).agg(Hours=("Hours", "sum"), Trips=("Plate", "size"))
+        staff_hours_chart = alt.Chart(by_staff).mark_bar(cornerRadiusEnd=4).encode(
+            x=alt.X("Hours:Q", title="Hours out"),
+            y=alt.Y("Staff:N", sort="-x", title=None),
+            color=alt.Color("Staff:N", scale=staff_scale, legend=None),
+            tooltip=["Staff", alt.Tooltip("Hours:Q", format=".1f"), "Trips"],
+        ).properties(title="Hours by Staff", height=max(160, 28 * len(by_staff)))
+        st.altair_chart(staff_hours_chart, use_container_width=True)
+    with gcol2:
+        by_vehicle = period_trips.groupby("Label", as_index=False).agg(Hours=("Hours", "sum"), Trips=("Plate", "size"))
+        vehicle_hours_chart = alt.Chart(by_vehicle).mark_bar(cornerRadiusEnd=4, color="#2a78d6").encode(
+            x=alt.X("Hours:Q", title="Hours out"),
+            y=alt.Y("Label:N", sort="-x", title=None),
+            tooltip=[alt.Tooltip("Label:N", title="Vehicle"), alt.Tooltip("Hours:Q", format=".1f"), "Trips"],
+        ).properties(title="Hours by Vehicle", height=max(160, 28 * len(by_vehicle)))
+        st.altair_chart(vehicle_hours_chart, use_container_width=True)
+
+    timeline = alt.Chart(period_trips).mark_bar(cornerRadius=3, height=14).encode(
+        x=alt.X("Start:T", title=None, axis=alt.Axis(format="%a %d %b %H:%M")),
+        x2="End:T",
+        y=alt.Y("Label:N", title=None, sort=alt.EncodingSortField("Start", order="ascending")),
+        color=alt.Color("Staff:N", scale=staff_scale, title="Staff"),
+        opacity=alt.condition(alt.datum.Status == "Still out", alt.value(0.55), alt.value(1)),
+        tooltip=[
+            alt.Tooltip("Label:N", title="Vehicle"), "Staff",
+            alt.Tooltip("Start:T", format="%d %b %H:%M"), alt.Tooltip("End:T", format="%d %b %H:%M"),
+            alt.Tooltip("Hours:Q", format=".1f"), "Status", alt.Tooltip("ReturnedBy:N", title="Returned by"),
+        ],
+    ).properties(title="Who Had What, and When", height=max(180, 26 * period_trips["Label"].nunique()))
+    st.altair_chart(timeline, use_container_width=True)
+    st.caption("Faded bars are vehicles still out; they run up to now.")
+
+    if not out_now.empty:
+        st.markdown("**Out right now**")
+        out_display = out_now.sort_values("Start")[["Plate", "Vehicle", "Staff", "Start", "Hours"]].copy()
+        out_display["Out for"] = out_display["Hours"].map(fmt_hours)
+        out_display["Start"] = out_display["Start"].dt.strftime("%d %b %H:%M")
+        st.dataframe(out_display.rename(columns={"Staff": "Taken by", "Start": "Since"}).drop(columns="Hours"),
+                     use_container_width=True, hide_index=True)
+
+    with st.expander("Recent trips"):
+        recent = period_trips.sort_values("Start", ascending=False).head(50)[
+            ["Start", "End", "Plate", "Vehicle", "Staff", "ReturnedBy", "Hours", "Status"]].copy()
+        recent["Duration"] = recent["Hours"].map(fmt_hours)
+        recent["Start"] = recent["Start"].dt.strftime("%d %b %H:%M")
+        recent["End"] = recent["End"].dt.strftime("%d %b %H:%M")
+        st.dataframe(recent.rename(columns={"Staff": "Taken by", "ReturnedBy": "Returned by"}).drop(columns="Hours"),
+                     use_container_width=True, hide_index=True)
+
+st.write("")
 
 # -----------------------------
 # Top 10 Customers
