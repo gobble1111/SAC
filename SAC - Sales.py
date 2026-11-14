@@ -324,6 +324,13 @@ trips_df["Label"] = trips_df["Vehicle"] + " (" + trips_df["Plate"] + ")"
 trip_mask = (trips_df["Start"].dt.date <= end_date) & (trips_df["End"].dt.date >= start_date)
 period_trips = trips_df.loc[trip_mask].copy()
 
+min_trip_minutes = st.slider(
+    "Ignore trips shorter than (minutes)", min_value=0, max_value=30, value=2,
+    help="Filters out accidental take-out/store clicks so counts and averages reflect real use.",
+    key="garage_min_trip_minutes",
+)
+period_trips = period_trips[(period_trips["Hours"] * 60 >= min_trip_minutes) | (period_trips["Status"] == "Still out")]
+
 def fmt_hours(h: float) -> str:
     mins = int(round(h * 60))
     return f"{mins // 60}h {mins % 60:02d}m"
@@ -366,20 +373,40 @@ else:
         ).properties(title="Hours by Vehicle", height=max(160, 28 * len(by_vehicle)))
         st.altair_chart(vehicle_hours_chart, use_container_width=True)
 
-    timeline = alt.Chart(period_trips).mark_bar(cornerRadius=3, height=14).encode(
-        x=alt.X("Start:T", title=None, axis=alt.Axis(format="%a %d %b %H:%M")),
-        x2="End:T",
-        y=alt.Y("Label:N", title=None, sort=alt.EncodingSortField("Start", order="ascending")),
-        color=alt.Color("Staff:N", scale=staff_scale, title="Staff"),
-        opacity=alt.condition(alt.datum.Status == "Still out", alt.value(0.55), alt.value(1)),
+    # Garage activity heatmap: minutes vehicles were out, spread over each hour slot they covered.
+    slot_minutes = {}
+    for t in period_trips.itertuples(index=False):
+        cursor = t.Start
+        while cursor < t.End:
+            slot_end = min(t.End, cursor.floor("h") + pd.Timedelta(hours=1))
+            key = (cursor.day_name(), cursor.hour)
+            slot_minutes[key] = slot_minutes.get(key, 0) + (slot_end - cursor).total_seconds() / 60
+            cursor = slot_end
+    garage_heat = pd.DataFrame(
+        [(d, h, m / 60) for (d, h), m in slot_minutes.items()], columns=["DayOfWeek", "HourOfDay", "Hours"]
+    )
+    day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    garage_heatmap = alt.Chart(garage_heat).mark_rect().encode(
+        x=alt.X("HourOfDay:O", title="Hour of Day", scale=alt.Scale(domain=list(range(24)))),
+        y=alt.Y("DayOfWeek:N", sort=day_order, title="Day of Week", scale=alt.Scale(domain=day_order)),
+        color=alt.Color("Hours:Q", scale=alt.Scale(scheme="blues"), title="Vehicle hours"),
         tooltip=[
-            alt.Tooltip("Label:N", title="Vehicle"), "Staff",
-            alt.Tooltip("Start:T", format="%d %b %H:%M"), alt.Tooltip("End:T", format="%d %b %H:%M"),
-            alt.Tooltip("Hours:Q", format=".1f"), "Status", alt.Tooltip("ReturnedBy:N", title="Returned by"),
+            alt.Tooltip("DayOfWeek:N", title="Day"),
+            alt.Tooltip("HourOfDay:O", title="Hour"),
+            alt.Tooltip("Hours:Q", title="Vehicle hours", format=".1f"),
         ],
-    ).properties(title="Who Had What, and When", height=max(180, 26 * period_trips["Label"].nunique()))
-    st.altair_chart(timeline, use_container_width=True)
-    st.caption("Faded bars are vehicles still out; they run up to now.")
+    ).properties(height=300, title="Garage Activity: When Vehicles Are Out")
+    st.altair_chart(garage_heatmap, use_container_width=True)
+
+    # Who uses what: hours out per staff member and vehicle.
+    usage_matrix = (
+        period_trips.pivot_table(index="Staff", columns="Label", values="Hours", aggfunc="sum", fill_value=0)
+        .reindex(staff_order)
+    )
+    usage_matrix["Total"] = usage_matrix.sum(axis=1)
+    usage_matrix = usage_matrix.sort_values("Total", ascending=False).round(1)
+    st.markdown("**Hours out by staff and vehicle**")
+    st.dataframe(usage_matrix, use_container_width=True)
 
     if not out_now.empty:
         st.markdown("**Out right now**")
